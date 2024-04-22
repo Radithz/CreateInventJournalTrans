@@ -1,0 +1,267 @@
+static void silCreateUpdateInventJournalTrans(Args _args)
+{
+    container   result, con, data;
+
+    InventJournalTrans      inventJournalTrans;
+    InventJournalTable      inventJournalTable;
+    InventDim               inventDim;
+
+    Map                     dimensionSpecifiers = new Map(Types::Int64, Types::String);
+    MainAccount             mainAcc;
+    JournalTableData        journalData;
+
+
+    ItemId                  itemId;
+    InventJournalId         journalId;
+    LineNum                 lineNum;
+
+    UnknownNoYes            transQtySignChangedToNegative;
+
+    CommaIo                         file;
+    Integer                 i, j, totalCount;
+    Qty                     qty;
+
+    Dialog          dialog;
+    DialogField     dfFile;
+    boolean         firstLine = true;
+
+    void getInfolog()
+    {
+        container   infologCon, infoline;
+        Exception   exception;
+
+        infologCon = infolog.cut();
+
+        for(j = 2; j <= conLen(infologCon); j++)
+        {
+            infoline = conPeek(infologCon, j);
+            exception = conPeek(infoline, 1);
+
+            result += [exception, infoline];
+        }
+
+        infolog.clear(0);
+    }
+
+    dialog = new Dialog("Importar diario de inventario");
+    dfFile = dialog.addField(extendedTypeStr(FilenameOpen));
+
+    if(dialog.run())
+    {
+        new FileIOPermission(dfFile.value(), 'r').assert();
+
+        file = new CommaIo(dfFile.value(), 'r');
+
+        if(file)
+        {
+            file.inFieldDelimiter(';');
+
+            journalData = JournalTableData::newTable(inventJournalTable);
+
+            try
+            {
+                while(file.status() == IO_Status::Ok)
+                {
+                    con = file.read();
+
+                    if(firstLine)
+                    {
+                        firstLine = false;
+                        continue;
+                    }
+
+                    if(conLen(con) > 0)
+                    {
+                        ttsBegin;
+
+                        itemId      = conPeek(con, 4);
+                        journalId   = conPeek(con, 3);
+                        lineNum     = conPeek(con, 2);
+
+                        setPrefix(strFmt("Artículo %1; Línea %2", itemId, lineNum));
+
+                        inventJournalTable = InventJournalTable::find(conPeek(con, 3));
+
+                        if(!inventJournalTable.RecId)
+                            throw error(strFmt("El diario %1 no existe", conPeek(con, 3)));
+
+                        inventDim.clear();
+
+                        inventDim.InventSiteId              = conPeek(con,5);
+                        inventDim.InventLocationId          = conPeek(con,6);
+                        inventDim.inventBatchId             = conPeek(con,7);
+                        inventDim.wMSLocationId             = conPeek(con,8);
+                        inventDim.wMSPalletId               = conPeek(con,9);
+
+                        inventDim = inventDim::findOrCreate(inventDim);
+
+                        select firstOnly forUpdate inventJournalTrans
+                            where   inventJournalTrans.ItemId       == itemId
+                            &&      inventJournalTrans.JournalId    == journalId
+                            &&      inventJournalTrans.LineNum      == lineNum;
+
+                        if(!inventJournalTrans.RecId)
+                        {
+                            inventJournalTrans.initFromInventJournalTable(inventJournalTable);
+                        }
+
+                        inventJournalTrans.TransDate        = str2Date(conPeek(con, 1), 123);
+                        inventJournalTrans.ItemId           = conPeek(con, 4);
+                        inventJournalTrans.LineNum          = conPeek(con, 2);
+                        inventJournalTrans.InventDimId      = InventDim.inventDimId;
+
+                        if(inventJournalTable.JournalType == InventJournalType::Transfer)
+                        {
+                            inventDim.clear();
+
+                            inventDim.InventSiteId              = conPeek(con, 20);
+                            inventDim.InventLocationId          = conPeek(con, 21);
+                            inventDim.inventBatchId             = conPeek(con, 22);
+                            inventDim.wMSLocationId             = conPeek(con, 23);
+                            inventDim.wMSPalletId               = conPeek(con, 24);
+
+                            inventDim = inventDim::findOrCreate(inventDim);
+
+                            inventJournalTrans.ToInventDimId    = InventDim.inventDimId;
+                        }
+
+                        qty = conPeek(con, 12);
+
+                        if(qty && (inventJournalTrans.Qty != qty))
+                        {
+                            inventJournalTrans.Qty      = qty;
+
+                            if (inventJournalTrans.inventMovement().transSign() >= 0)
+                            {
+                                transQtySignChangedToNegative = UnknownNoYes::Unknown;
+                            }
+                            else
+                            {
+                                switch (transQtySignChangedToNegative)
+                                {
+                                    case   UnknownNoYes::Yes     :
+                                        transQtySignChangedToNegative = UnknownNoYes::No;
+                                        break;
+                                    case   UnknownNoYes::Unknown :
+                                        transQtySignChangedToNegative = UnknownNoYes::Yes;
+                                        break;
+                                }
+                            }
+
+                            if (transQtySignChangedToNegative == UnknownNoYes::Yes)
+                            {
+                                inventJournalTrans.inventMovement().journalSetQty(NoYes::Yes);
+                            }
+                            else
+                            {
+                                inventJournalTrans.inventMovement().journalSetQty(NoYes::No);
+                            }
+                        }
+
+                        inventJournalTrans.initFromInventTable(InventTable::find(itemId), false, false, true);
+
+                        if(conPeek(con, 10))
+                            inventJournalTrans.InventOnHand     = conPeek(con, 10);
+
+                        inventJournalTrans.Counted          = conPeek(con, 11);
+                        inventJournalTrans.Worker           = HcmWorker::findByPersonnelNumber(conPeek(con, 13)).RecId;
+
+                        if(conPeek(con, 14))
+                            inventJournalTrans.CostPrice        = conPeek(con, 14);
+                        if(conPeek(con, 15))
+                            inventJournalTrans.CostAmount       = conPeek(con, 15);
+                        inventJournalTrans.PriceUnit        = 1;
+
+                        if(curext() =="slf")
+                        {
+
+                        if(conPeek(con, 17))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('ARNEG').RecId, conPeek(con, 17)); //ANEG
+                        if(conPeek(con, 18))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('CATEG').RecId, conPeek(con, 18)); // CATEG
+                        if(conPeek(con, 19))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('MARCA').RecId, conPeek(con, 19)); // MARCA
+                        if(conPeek(con, 20))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('CANAL').RecId, conPeek(con, 20)); //CANAL
+                             if(conPeek(con, 21))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('CCOSTO').RecId, conPeek(con, 21)); //CCOSTO
+                             if(conPeek(con, 22))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('SUBCANAL').RecId, conPeek(con, 22)); // SUBCANAL
+                              if(conPeek(con, 23))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('GESTION').RecId, conPeek(con, 23)); //GESTION
+
+                        }
+                        else
+                        {
+                          if(conPeek(con, 17))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('ARNEG_DOREL').RecId, conPeek(con, 17)); //ANEG
+                        if(conPeek(con, 18))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('CATEG_DOREL').RecId, conPeek(con, 18)); // CATEG
+                        if(conPeek(con, 19))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('MARCA_DOREL').RecId, conPeek(con, 19)); // MARCA
+                            if(conPeek(con, 20))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('CANAL_DOREL').RecId, conPeek(con, 20)); //CANAL
+                             if(conPeek(con, 21))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('CCOSTO_DOREL').RecId, conPeek(con, 21)); //CCOSTO
+                             if(conPeek(con, 22))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('SUBCANAL_DOREL').RecId, conPeek(con, 22)); // MARCA
+                                    if(conPeek(con, 23))
+                            dimensionSpecifiers.insert(DimensionAttribute::findByName('GESTION_DOREL').RecId, conPeek(con, 23)); //GESTION
+
+
+                        }
+
+                        inventJournalTrans.DefaultDimension = SILCMEXIntegration::getDimensionDefaultFromList(dimensionSpecifiers);
+
+                        if(conPeek(con, 16))
+                            inventJournalTrans.LedgerDimension  = DimensionStorage::getDefaultAccountForMainAccountNum(conPeek(con, 16));
+
+                        if(inventJournalTrans.validateWrite())
+                        {
+                            if(inventJournalTrans.RecId)
+                                inventJournalTrans.update();
+                            else
+                                inventJournalTrans.insert();
+                        }
+                        else
+                            throw error(strFmt('Error al crear/modificar línea %1', lineNum));
+
+                        totalCount++;
+
+                        inventJournalTable.selectForUpdate(true);
+                        inventJournalTable.NumOfLines++;
+                        inventJournalTable.doUpdate();
+
+                        ttsCommit;
+                    }
+                }
+            }
+            catch
+            {
+                getInfolog();
+
+                retry;
+            }
+
+            setPrefix("Crear / Modificar diarios de inventario");
+
+            for(i = 1; i <= conLen(result); i += 2)
+            {
+                data = conPeek(result, i + 1);
+
+                switch(conPeek(data, 1))
+                {
+                    case Exception::Warning:
+                        warning(conPeek(data, 2));
+                        break;
+
+                    case Exception::Error:
+                        error(conPeek(data, 2));
+                        break;
+                }
+            }
+        }
+    }
+
+    info(strFmt("Número de registros creados / modificados %1", totalCount));
+}
